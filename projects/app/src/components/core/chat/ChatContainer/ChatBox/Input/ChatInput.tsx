@@ -1,3 +1,4 @@
+import { useSpeech } from '@/web/common/hooks/useSpeech';
 import { useSystemStore } from '@/web/common/system/useSystemStore';
 import { Box, Flex, Spinner, Textarea } from '@chakra-ui/react';
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
@@ -5,9 +6,9 @@ import { useTranslation } from 'next-i18next';
 import MyTooltip from '@fastgpt/web/components/common/MyTooltip';
 import MyIcon from '@fastgpt/web/components/common/Icon';
 import { useRequest2 } from '@fastgpt/web/hooks/useRequest';
-import { type ChatBoxInputFormType, type ChatBoxInputType, type SendPromptFnType } from '../type';
+import { ChatBoxInputFormType, ChatBoxInputType, SendPromptFnType } from '../type';
 import { textareaMinH } from '../constants';
-import { useFieldArray, type UseFormReturn } from 'react-hook-form';
+import { useFieldArray, UseFormReturn } from 'react-hook-form';
 import { ChatBoxContext } from '../Provider';
 import dynamic from 'next/dynamic';
 import { useContextSelector } from 'use-context-selector';
@@ -17,7 +18,6 @@ import FilePreview from '../../components/FilePreview';
 import { useFileUpload } from '../hooks/useFileUpload';
 import ComplianceTip from '@/components/common/ComplianceTip/index';
 import { useToast } from '@fastgpt/web/hooks/useToast';
-import VoiceInput, { type VoiceInputComponentRef } from './VoiceInput';
 
 const InputGuideBox = dynamic(() => import('./InputGuideBox'));
 
@@ -44,7 +44,6 @@ const ChatInput = ({
   const { t } = useTranslation();
   const { toast } = useToast();
   const { isPc } = useSystem();
-  const VoiceInputRef = useRef<VoiceInputComponentRef>(null);
 
   const { setValue, watch, control } = chatForm;
   const inputValue = watch('input');
@@ -54,6 +53,7 @@ const ChatInput = ({
   const chatId = useContextSelector(ChatBoxContext, (v) => v.chatId);
   const isChatting = useContextSelector(ChatBoxContext, (v) => v.isChatting);
   const whisperConfig = useContextSelector(ChatBoxContext, (v) => v.whisperConfig);
+  const autoTTSResponse = useContextSelector(ChatBoxContext, (v) => v.autoTTSResponse);
   const chatInputGuide = useContextSelector(ChatBoxContext, (v) => v.chatInputGuide);
   const fileSelectConfig = useContextSelector(ChatBoxContext, (v) => v.fileSelectConfig);
 
@@ -84,6 +84,51 @@ const ChatInput = ({
   const havInput = !!inputValue || fileList.length > 0;
   const canSendMessage = havInput && !hasFileUploading;
 
+  //剪切板内容
+  const [clipboardContent, setClipboardContent] = useState('');
+  const [buttons, setButtons] = useState(['解释', '翻译', '总结', '改善写作']);
+//
+window.addEventListener('message', function(event) {
+  // 1. 验证消息来源
+/*   const allowedOrigin = 'http://192.168.1.60:18092';
+  if (event.origin !== allowedOrigin) return; */
+  // 2. 获取传递的数据
+  const receivedData = event.data;
+  console.log('接收到的消息:', receivedData);
+  // 3. 在页面上显示消息
+  if (receivedData) { 
+    setClipboardContent(receivedData || '')
+   // displayElement.textContent = `接收到的消息: ${receivedData}`;
+    setValue('input', receivedData);
+  }
+});
+//
+  let hasInitialized = false;
+  useEffect(() => {
+    const readClipboard = async () => {
+      try {
+       // const text = await navigator.clipboard.readText();
+       // setClipboardContent(text || ''); // 如果剪切板有值，更新状态
+       // console.log('剪贴板内容:', text);
+      } catch (err) {
+        console.warn('自动读取失败:', err);
+      }
+    };
+
+    if (!hasInitialized) {
+      readClipboard();
+      hasInitialized = true;
+    }
+    // // 页面切换监听
+    // const handleVisibilityChange = () => {
+    //   if (document.visibilityState === 'visible') {
+    //     readClipboard();
+    //   }
+    // };
+    // document.addEventListener('visibilitychange', handleVisibilityChange);
+    // return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
   // Upload files
   useRequest2(uploadFiles, {
     manual: false,
@@ -102,8 +147,89 @@ const ChatInput = ({
         files: fileList
       });
       replaceFiles([]);
+      setValue('input', '');
     },
     [TextareaDom, canSendMessage, fileList, onSendMessage, replaceFiles]
+  );
+
+  /* whisper init */
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const {
+    isSpeaking,
+    isTransCription,
+    stopSpeak,
+    startSpeak,
+    speakingTimeString,
+    renderAudioGraph,
+    stream
+  } = useSpeech({ appId, ...outLinkAuthData });
+  const onWhisperRecord = useCallback(() => {
+    const finishWhisperTranscription = (text: string) => {
+      if (!text) return;
+      if (whisperConfig?.autoSend) {
+        onSendMessage({
+          text,
+          files: fileList,
+          autoTTSResponse
+        });
+        replaceFiles([]);
+      } else {
+        resetInputVal({ text });
+      }
+    };
+    if (isSpeaking) {
+      return stopSpeak();
+    }
+    startSpeak(finishWhisperTranscription);
+  }, [
+    autoTTSResponse,
+    fileList,
+    isSpeaking,
+    onSendMessage,
+    replaceFiles,
+    resetInputVal,
+    startSpeak,
+    stopSpeak,
+    whisperConfig?.autoSend
+  ]);
+  useEffect(() => {
+    if (!stream) {
+      return;
+    }
+    const audioContext = new AudioContext();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 4096;
+    analyser.smoothingTimeConstant = 1;
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    const renderCurve = () => {
+      if (!canvasRef.current) return;
+      renderAudioGraph(analyser, canvasRef.current);
+      window.requestAnimationFrame(renderCurve);
+    };
+    renderCurve();
+  }, [renderAudioGraph, stream]);
+
+  const RenderTranslateLoading = useMemo(
+    () => (
+      <Flex
+        position={'absolute'}
+        top={0}
+        bottom={0}
+        left={0}
+        right={0}
+        zIndex={10}
+        pl={5}
+        alignItems={'center'}
+        bg={'white'}
+        color={'primary.500'}
+        visibility={isSpeaking && isTransCription ? 'visible' : 'hidden'}
+      >
+        <Spinner size={'sm'} mr={4} />
+        {t('common:core.chat.Converting to text')}
+      </Flex>
+    ),
+    [isSpeaking, isTransCription, t]
   );
 
   const RenderTextarea = useMemo(
@@ -118,6 +244,7 @@ const ChatInput = ({
             cursor={'pointer'}
             transform={'translateY(1px)'}
             onClick={() => {
+              if (isSpeaking) return;
               onOpenSelectFile();
             }}
           >
@@ -127,23 +254,29 @@ const ChatInput = ({
             <File onSelect={(files) => onSelectFile({ files })} />
           </Flex>
         )}
+
         {/* input area */}
         <Textarea
+        id='messageDisplay'
           ref={TextareaDom}
           py={0}
           pl={2}
-          pr={['30px', '48px']}
+          pr={['22px', '48px']}
           border={'none'}
           _focusVisible={{
             border: 'none'
           }}
           placeholder={
-            isPc ? t('common:core.chat.Type a message') : t('chat:input_placeholder_phone')
+            isSpeaking
+              ? t('common:core.chat.Speaking')
+              : isPc
+                ? t('common:core.chat.Type a message')
+                : t('chat:input_placeholder_phone')
           }
           resize={'none'}
           rows={1}
-          height={'22px'}
-          lineHeight={'22px'}
+          height={'40px'}
+          lineHeight={'40px'}
           maxHeight={'50vh'}
           maxLength={-1}
           overflowY={'auto'}
@@ -151,8 +284,10 @@ const ChatInput = ({
           wordBreak={'break-all'}
           boxShadow={'none !important'}
           color={'myGray.900'}
-          fontSize={['md', 'sm']}
+          isDisabled={isSpeaking}
           value={inputValue}
+          style={{ fontSize: '15px' }}
+          // fontSize={['md', 'sm']}
           onChange={(e) => {
             const textarea = e.target;
             textarea.style.height = textareaMinH;
@@ -202,79 +337,124 @@ const ChatInput = ({
               }
             }
           }}
+          sx={{
+            '::placeholder': {
+              fontSize: '14px' // 设置placeholder的字体大小
+            }
+          }}
         />
-        <Flex
-          alignItems={'center'}
-          position={'absolute'}
-          right={[2, 4]}
-          bottom={['10px', '12px']}
-          zIndex={3}
-        >
-          {/* Voice input icon */}
-          {whisperConfig?.open && !inputValue && (
-            <MyTooltip label={t('common:core.chat.Record')}>
-              <Flex
-                alignItems={'center'}
-                justifyContent={'center'}
-                flexShrink={0}
-                h={['28px', '32px']}
-                w={['28px', '32px']}
-                mr={2}
-                borderRadius={'md'}
-                cursor={'pointer'}
-                _hover={{ bg: '#F5F5F8' }}
-                onClick={() => {
-                  VoiceInputRef.current?.onSpeak?.();
+        <Flex alignItems={'center'} position={'absolute'} right={[2, 4]} bottom={['10px', '12px']}>
+          {/* voice-input */}
+          {whisperConfig?.open && !inputValue && !isChatting && (
+            <>
+              <canvas
+                ref={canvasRef}
+                style={{
+                  height: '30px',
+                  width: isSpeaking && !isTransCription ? '100px' : 0,
+                  background: 'white',
+                  zIndex: 0
                 }}
+              />
+              {isSpeaking && (
+                <MyTooltip label={t('common:core.chat.Cancel Speak')}>
+                  <Flex
+                    mr={2}
+                    alignItems={'center'}
+                    justifyContent={'center'}
+                    flexShrink={0}
+                    h={['26px', '32px']}
+                    w={['26px', '32px']}
+                    borderRadius={'md'}
+                    cursor={'pointer'}
+                    _hover={{ bg: '#F5F5F8' }}
+                    onClick={() => stopSpeak(true)}
+                  >
+                    <MyIcon
+                      name={'core/chat/cancelSpeak'}
+                      width={['20px', '22px']}
+                      height={['20px', '22px']}
+                    />
+                  </Flex>
+                </MyTooltip>
+              )}
+              <MyTooltip
+                label={
+                  isSpeaking ? t('common:core.chat.Finish Speak') : t('common:core.chat.Record')
+                }
               >
+                <Flex
+                  mr={2}
+                  alignItems={'center'}
+                  justifyContent={'center'}
+                  flexShrink={0}
+                  h={['26px', '32px']}
+                  w={['26px', '32px']}
+                  borderRadius={'md'}
+                  cursor={'pointer'}
+                  _hover={{ bg: '#F5F5F8' }}
+                  onClick={onWhisperRecord}
+                >
+                  <MyIcon
+                    name={isSpeaking ? 'core/chat/finishSpeak' : 'core/chat/recordFill'}
+                    width={['20px', '22px']}
+                    height={['20px', '22px']}
+                    color={isSpeaking ? 'primary.500' : 'myGray.600'}
+                  />
+                </Flex>
+              </MyTooltip>
+            </>
+          )}
+          {/* send and stop icon */}
+          {isSpeaking ? (
+            <Box color={'#5A646E'} w={'36px'} textAlign={'right'} whiteSpace={'nowrap'}>
+              {speakingTimeString}
+            </Box>
+          ) : (
+            <Flex
+              alignItems={'center'}
+              justifyContent={'center'}
+              flexShrink={0}
+              h={['28px', '32px']}
+              w={['28px', '32px']}
+              borderRadius={'md'}
+              bg={
+                isSpeaking || isChatting
+                  ? ''
+                  : !havInput || hasFileUploading
+                    ? '#E5E5E5'
+                    : 'primary.500'
+              }
+              cursor={havInput ? 'pointer' : 'not-allowed'}
+              lineHeight={1}
+              onClick={() => {
+                if (isChatting) {
+                  return onStop();
+                }
+                return handleSend();
+              }}
+            >
+              {isChatting ? (
                 <MyIcon
-                  name={'core/chat/recordFill'}
+                  animation={'zoomStopIcon 0.4s infinite alternate'}
                   width={['22px', '25px']}
                   height={['22px', '25px']}
-                  color={'myGray.600'}
+                  cursor={'pointer'}
+                  name={'stop'}
+                  color={'gray.500'}
                 />
-              </Flex>
-            </MyTooltip>
+              ) : (
+                <MyTooltip label={t('common:core.chat.Send Message')}>
+                  <MyIcon
+                    name={'core/chat/sendFill'}
+                    width={['18px', '20px']}
+                    height={['18px', '20px']}
+                    color={'white'}
+                  />
+                </MyTooltip>
+              )}
+            </Flex>
           )}
-
-          {/* send and stop icon */}
-          <Flex
-            alignItems={'center'}
-            justifyContent={'center'}
-            flexShrink={0}
-            h={['28px', '32px']}
-            w={['28px', '32px']}
-            borderRadius={'md'}
-            bg={isChatting ? '' : !havInput || hasFileUploading ? '#E5E5E5' : 'primary.500'}
-            cursor={havInput ? 'pointer' : 'not-allowed'}
-            lineHeight={1}
-            onClick={() => {
-              if (isChatting) {
-                return onStop();
-              }
-              return handleSend();
-            }}
-          >
-            {isChatting ? (
-              <MyIcon
-                animation={'zoomStopIcon 0.4s infinite alternate'}
-                width={['22px', '25px']}
-                height={['22px', '25px']}
-                cursor={'pointer'}
-                name={'stop'}
-                color={'gray.500'}
-              />
-            ) : (
-              <MyTooltip label={t('common:core.chat.Send Message')}>
-                <MyIcon
-                  name={'core/chat/sendFill'}
-                  width={['18px', '20px']}
-                  height={['18px', '20px']}
-                  color={'white'}
-                />
-              </MyTooltip>
-            )}
-          </Flex>
         </Flex>
       </Flex>
     ),
@@ -288,15 +468,21 @@ const ChatInput = ({
       inputValue,
       isChatting,
       isPc,
+      isSpeaking,
+      isTransCription,
       onOpenSelectFile,
       onSelectFile,
       onStop,
+      onWhisperRecord,
       selectFileIcon,
       selectFileLabel,
       setValue,
       showSelectFile,
       showSelectImg,
-      t
+      speakingTimeString,
+      stopSpeak,
+      t,
+      whisperConfig?.open
     ]
   );
 
@@ -304,8 +490,10 @@ const ChatInput = ({
     <Box
       m={['0 auto', '10px auto']}
       w={'100%'}
-      maxW={['auto', 'min(800px, 100%)']}
+      maxW={['auto', 'min(900px, 100%)']}
       px={[0, 5]}
+      boxShadow={isSpeaking ? `0 0 10px rgba(54,111,255,0.4)` : `0 0 10px rgba(0,0,0,0.2)`}
+      borderRadius={['none', 'md']}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -331,11 +519,84 @@ const ChatInput = ({
         }
       }}
     >
+      <Box h={'10px'} />
+   {/*    <Box
+        position={'relative'}
+        borderRadius={['none', 'md']}
+        pt={'5px'}
+        pl={'5px'}
+        minH={'70px'}
+        bg={'white'}
+        overflow={'display'}
+        {...(isPc
+          ? {
+              border: '1px solid',
+              borderColor: 'rgba(0,0,0,0.12)'
+            }
+          : {
+              borderTop: '1px solid',
+              borderTopColor: 'rgba(0,0,0,0.15)'
+            })}
+      >
+        <>
+          <div>
+            <span style={{ fontSize: '15px', color: '#121824' }}>来自您选择的文本</span>
+            <div
+              style={{
+                color: '#808a9c',
+                overflow: 'hidden',
+                fontSize: '14px',
+                WebkitLineClamp: 2, // 设置最大行数
+                display: '-webkit-box', // 启用多行文本显示
+                WebkitBoxOrient: 'vertical', // 必须设置方向为垂直
+                whiteSpace: 'normal' // 允许换行
+              }}
+            >
+              {clipboardContent || '剪切板为空'}
+            </div>
+          </div>
+        </>
+      </Box> */}
       <Box
         pt={fileList.length > 0 ? '0' : ['14px', '18px']}
         pb={['14px', '18px']}
         position={'relative'}
-        boxShadow={`0 0 10px rgba(0,0,0,0.2)`}
+        borderRadius={['none', 'md']}
+        bg={'white'}
+        overflow={'display'}
+      >
+       {/*  <>
+          <div>
+            <div>
+              {buttons.map((label, index) => (
+                <button
+                  style={{
+                    backgroundColor: '#f7f7f8',
+                    // color: '#121824',
+                    color: clipboardContent == '' ? '#ccc' : '#121824',
+                    borderRadius: '0.5rem',
+                    padding: '6px 10px',
+                    marginLeft: index === 0 ? '0' : '15px',
+                    fontSize: '14PX',
+                    minWidth: 'auto' // 自动宽度，根据内容和padding计算
+                  }}
+                  key={index}
+                  onClick={() => alert(`${label} clicked`)}
+                  disabled={clipboardContent == '' ? true : false}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </> */}
+      </Box>
+      <Box
+        pt={fileList.length > 0 ? '0' : ['14px', '18px']}
+        pb={['14px', '18px']}
+        position={'relative'}
+        bottom={'8px'}
+        // boxShadow={isSpeaking ? `0 0 10px rgba(54,111,255,0.4)` : `0 0 10px rgba(0,0,0,0.2)`}
         borderRadius={['none', 'md']}
         bg={'white'}
         overflow={'display'}
@@ -362,20 +623,14 @@ const ChatInput = ({
             }}
           />
         )}
+
+        {/* translate loading */}
+        {RenderTranslateLoading}
+
         {/* file preview */}
         <Box px={[1, 3]}>
           <FilePreview fileList={fileList} removeFiles={removeFiles} />
         </Box>
-
-        {/* voice input and loading container */}
-        {!inputValue && (
-          <VoiceInput
-            ref={VoiceInputRef}
-            onSendMessage={onSendMessage}
-            resetInputVal={resetInputVal}
-          />
-        )}
-
         {RenderTextarea}
       </Box>
       <ComplianceTip type={'chat'} />
